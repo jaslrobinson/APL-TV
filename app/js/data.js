@@ -99,7 +99,7 @@
         });
     }
 
-    function loadXtream(src, progress) {
+    function loadXtream(src, progress, onLive) {
         var out = { id: src.id, v: CATALOG_V, at: Date.now(), type: "xtream", live: { cats: [], chans: [] }, movies: { cats: [], items: [] }, series: { cats: [], items: [] }, failed: {} };
         function lists(what) {
             return function (r) {
@@ -126,6 +126,7 @@
                     logo: c.stream_icon || "", cat: src.id + ":" + c.category_id, epg: c.epg_channel_id || "", arch: parseInt(c.tv_archive, 10) ? (parseInt(c.tv_archive_duration, 10) || 1) : 0
                 });
             });
+            if (onLive) onLive(out);
             progress(T("Loading movies…"));
             return Promise.all([xApi(src, "get_vod_categories"), xApi(src, "get_vod_streams")]).then(lists("movies")).catch(lost("movies"));
         }).then(function (r) {
@@ -314,8 +315,8 @@
     }
 
     var retryTimers = {};
-    function loadSource(src, progress) {
-        return (src.type === "xtream" ? loadXtream(src, progress) : src.type === "stalker" ? loadStalker(src, progress) : isMedia(src) ? loadMedia(src, progress) : loadM3U(src, progress)).then(function (c) {
+    function loadSource(src, progress, onLive) {
+        return (src.type === "xtream" ? loadXtream(src, progress, onLive) : src.type === "stalker" ? loadStalker(src, progress) : isMedia(src) ? loadMedia(src, progress) : loadM3U(src, progress)).then(function (c) {
             /* The movies or the series did not come (the provider too slow, an error): the ones from before stay,
                instead of an empty Movies tab until the next refresh, and APL TV asks again in 10 minutes. */
             var prev = cats[src.id], failed = c.failed || {}, missed = [];
@@ -419,7 +420,8 @@
         });
     }
 
-    /* At start-up: what is saved shows at once, sources older than 6 hours are refreshed after */
+    /* At start-up: cached sources show at once; missing ones load in parallel, channels first so Live TV
+       appears as soon as the first source answers, with movies and series following in the background. */
     function start(progress) {
         var list = sources();
         return (TV.epg && TV.epg.prune ? TV.epg.prune() : Promise.resolve()).then(function () { return Promise.all(list.map(function (s) {
@@ -434,8 +436,14 @@
             }, 4000);
             rebuild();
             if (!missing.length) return;
-            return sequence(missing, function (s) { return loadSource(s, progress).catch(function (e) { TV.log("load " + s.name + ": " + e.message); TV.toast(s.name + " : " + e.message, true); }); })
-                .then(rebuild);
+            var liveShown = false;
+            function onLive(partial) {
+                cats[partial.id] = partial;
+                if (!liveShown) { liveShown = true; rebuild(); }
+            }
+            return Promise.all(missing.map(function (s) {
+                return loadSource(s, progress, onLive).catch(function (e) { TV.log("load " + s.name + ": " + e.message); TV.toast(s.name + " : " + e.message, true); });
+            })).then(rebuild);
         }).then(function () {
             var old = sources().filter(function (s) { return cats[s.id] && (Date.now() - (cats[s.id].at || 0) > MAX_AGE || (cats[s.id].v || 1) < CATALOG_V); });
             if (old.length) whenQuiet(function () { refresh(old, function () {}); });
